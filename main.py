@@ -263,7 +263,7 @@ def main() -> None:
     # Send a startup notice with interactive buttons
     startup_msg = (
         "📊 *ربات حرفه‌ای بازارهای مالی فعال شد!*\n\n"
-        f"⏱ هر `{interval}` ثانیه قیمت طلا چک می‌شود.\n"
+        "🥇 برای دیدن قیمت طلا هر وقت خواستی دکمهٔ «طلا» رو بزن.\n"
         f"📡 منابع: `tgju.org` و `TradingView`\n\n"
         "از دکمه‌های زیر استفاده کن 👇"
     )
@@ -452,33 +452,11 @@ def main() -> None:
     cycle_count = 0
 
     while not stop_flag["value"]:
-        gold = fetch_gold_price()
         cycle_count += 1
 
-        if gold is not None:
-            triggered = False
-            reason = ""
-
-            if price_min is not None and gold.price_toman < price_min:
-                triggered = True
-                reason = f"قیمت زیر حداقل ({price_min:,})"
-            elif price_max is not None and gold.price_toman > price_max:
-                triggered = True
-                reason = f"قیمت بالای حداکثر ({price_max:,})"
-
-            should_send = triggered or (last_sent_price != gold.price_toman)
-            if should_send:
-                message = format_gold(gold)
-                if triggered:
-                    message = f"🚨 *هشدار قیمت طلا*\n{reason}\n\n" + message
-                notifier.send_message(
-                    message,
-                    buttons=_build_main_menu_buttons(),
-                )
-                last_sent_price = gold.price_toman
-                save_last_price(gold.price_toman)
-        else:
-            print(f"[main] [{cycle_count}] Could not fetch price, retrying...")
+        # ── ارسال خودکار قیمت طلا غیرفعال شد ──
+        # قیمت طلا دیگر به صورت خودکار ارسال نمی‌شود و فقط زمانی نمایش داده می‌شود
+        # که کاربر دکمهٔ «طلا» را بزند یا دستور /gold را بفرستد.
 
         # Check price alerts for all active alerts
         alerts = alert_manager.list_alerts()
