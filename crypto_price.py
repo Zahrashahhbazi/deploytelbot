@@ -1,4 +1,9 @@
-
+"""
+crypto_price.py
+Module for fetching live prices from TradingView.
+Supports multiple markets: Crypto, Forex, Commodities, Stocks, Indices.
+Also provides technical analysis (RSI, MACD, SMA) and chart URLs.
+"""
 from __future__ import annotations
 import json
 import re
@@ -28,8 +33,6 @@ MARKET_NAMES = {
     MARKET_STOCK: "📈 سهام آمریکا",
     MARKET_INDEX: "📊 شاخص‌ها",
 }
-
-
 
 # ─── Asset definitions ───────────────────────────────────────────────
 # Format: (display_name, ticker, symbol, market)
@@ -138,8 +141,6 @@ ASSETS: List[Tuple[str, str, str, str]] = [
     ("شاخص دلار", "TVC:DXY", "DXY", MARKET_INDEX),
     ("بیت‌کوین دامیننس", "CRYPTOCAP:BTC.D", "BTC.D", MARKET_INDEX),
     ("شاخص ترس و طمع", "CRYPTOCAP:FEAR", "FEAR", MARKET_INDEX),
-    ("شاخص کل بورس تهران", "TSE:TPE", "TSE", MARKET_INDEX),
-    ("شاخص همتا", "TSE:HMTA", "HAMTA", MARKET_INDEX),
 ]
 
 
@@ -277,6 +278,10 @@ SCANNER_MARKET = {
     MARKET_INDEX: "index",
 }
 
+# Some indices live in a different scanner market than the generic "index".
+# We try these slugs (in order) for each index ticker until one returns data.
+INDEX_SCANNER_SLUGS = ["america", "global", "cfd", "forex", "crypto", "economy"]
+
 
 def _get_scanner_endpoint(market: str) -> str:
     """Get the scanner endpoint for a market type."""
@@ -284,7 +289,79 @@ def _get_scanner_endpoint(market: str) -> str:
     return TV_SCANNER.format(market=slug)
 
 
+def _index_scanner_endpoints() -> List[str]:
+    """Return candidate scanner endpoints to try for index tickers."""
+    return [TV_SCANNER.format(market=s) for s in INDEX_SCANNER_SLUGS]
+
+
 # ─── Fetch functions ─────────────────────────────────────────────────
+
+def _scanner_parse(data: dict, m_tickers: List[str], market: str,
+                   timestamp: str) -> Dict[str, Optional[AssetPrice]]:
+    """Parse a TradingView scanner response into AssetPrice results."""
+    results: Dict[str, Optional[AssetPrice]] = {}
+    for item in data.get("data", []):
+        try:
+            d = item["d"]
+            ticker = item["s"]
+
+            display_name = ticker
+            symbol = ticker.split(":")[-1]
+            for name, t, sym, _ in ASSETS:
+                if t == ticker:
+                    display_name = name
+                    symbol = sym
+                    break
+
+            rec_val = d[15] if len(d) > 15 and d[15] is not None else None
+            rec_str = None
+            if rec_val is not None:
+                if rec_val >= 0.8:
+                    rec_str = "STRONG_BUY"
+                elif rec_val >= 0.3:
+                    rec_str = "BUY"
+                elif rec_val <= -0.8:
+                    rec_str = "STRONG_SELL"
+                elif rec_val <= -0.3:
+                    rec_str = "SELL"
+                else:
+                    rec_str = "NEUTRAL"
+
+            results[ticker] = AssetPrice(
+                name=display_name,
+                symbol=symbol,
+                ticker=ticker,
+                market=market,
+                price=float(d[1]) if d[1] else 0.0,
+                change=float(d[3]) if d[3] else 0.0,
+                change_percent=float(d[2]) if d[2] is not None else 0.0,
+                high=float(d[4]) if d[4] else 0.0,
+                low=float(d[5]) if d[5] else 0.0,
+                volume=float(d[6]) if d[6] else 0.0,
+                timestamp=timestamp,
+                rsi=float(d[7]) if len(d) > 7 and d[7] is not None else None,
+                macd=float(d[8]) if len(d) > 8 and d[8] is not None else None,
+                macd_signal=float(d[9]) if len(d) > 9 and d[9] is not None else None,
+                sma_50=float(d[11]) if len(d) > 11 and d[11] is not None else None,
+                sma_200=float(d[12]) if len(d) > 12 and d[12] is not None else None,
+                recommendation=rec_str,
+            )
+        except (IndexError, TypeError, ValueError) as exc:
+            print(f"[crypto_price] Parse error for {item.get('s', '?')}: {exc}")
+            results[item.get("s", "?")] = None
+    return results
+
+
+def _scan_endpoints_for(market: str) -> List[str]:
+    """Return the list of scanner endpoints to try for a market.
+
+    Indices are spread across several TradingView scanner markets, so we
+    try a list of candidates. Other markets use a single known endpoint.
+    """
+    if market == MARKET_INDEX:
+        return _index_scanner_endpoints()
+    return [_get_scanner_endpoint(market)]
+
 
 def fetch_prices(tickers: List[str]) -> List[Optional[AssetPrice]]:
     """
@@ -294,13 +371,32 @@ def fetch_prices(tickers: List[str]) -> List[Optional[AssetPrice]]:
     if not tickers:
         return []
 
+    # Tickers that have a dedicated (non-scanner) source.
+    special_sources = {
+        "CRYPTOCAP:FEAR": fetch_fear_greed_index,
+    }
+
     # Group tickers by market
     market_groups: Dict[str, List[str]] = {}
     for t in tickers:
+        if t in special_sources:
+            continue
         m = _get_market_for_ticker(t)
         if m not in market_groups:
             market_groups[m] = []
         market_groups[m].append(t)
+
+    all_results: Dict[str, Optional[AssetPrice]] = {}
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Resolve special-source tickers first.
+    for t, src in special_sources.items():
+        if t in tickers:
+            try:
+                all_results[t] = src()
+            except Exception as exc:
+                print(f"[crypto_price] special source error for {t}: {exc}")
+                all_results[t] = None
 
     # Columns to fetch (order MUST match the parsing below)
     columns = [
@@ -312,92 +408,244 @@ def fetch_prices(tickers: List[str]) -> List[Optional[AssetPrice]]:
         "Recommend.All",
     ]
 
-    all_results: Dict[str, Optional[AssetPrice]] = {}
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     for market, m_tickers in market_groups.items():
-        endpoint = _get_scanner_endpoint(market)
-        payload = {
-            "symbols": {"tickers": m_tickers, "query": {"types": []}},
-            "columns": columns,
-        }
+        endpoints = _scan_endpoints_for(market)
 
-        try:
-            response = _request_with_fallback(
-                "POST",
-                endpoint,
-                json=payload,
-                headers=_get_headers(),
-                timeout=15,
-                proxies=PROXIES,
-                verify=False,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except Exception as exc:
-            print(f"[crypto_price] Network error for {market}: {exc}")
+        # Index tickers live in different scanner markets, so each must be
+        # queried individually against the candidate endpoint list.
+        if market == MARKET_INDEX:
             for t in m_tickers:
-                all_results[t] = None
+                for endpoint in endpoints:
+                    payload = {
+                        "symbols": {"tickers": [t], "query": {"types": []}},
+                        "columns": columns,
+                    }
+                    try:
+                        response = _request_with_fallback(
+                            "POST",
+                            endpoint,
+                            json=payload,
+                            headers=_get_headers(),
+                            timeout=15,
+                            proxies=PROXIES,
+                            verify=False,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                    except Exception as exc:
+                        print(f"[crypto_price] Network error for {t} @ {endpoint}: {exc}")
+                        continue
+                    parsed = _scanner_parse(data, [t], market, timestamp)
+                    if parsed.get(t) is not None:
+                        all_results[t] = parsed[t]
+                        break
+                else:
+                    all_results[t] = None
             continue
 
-        for item in data.get("data", []):
+        for endpoint in endpoints:
+            payload = {
+                "symbols": {"tickers": m_tickers, "query": {"types": []}},
+                "columns": columns,
+            }
+
             try:
-                d = item["d"]
-                ticker = item["s"]
-
-                # Find display name and symbol
-                display_name = ticker
-                symbol = ticker.split(":")[-1]
-                for name, t, sym, _ in ASSETS:
-                    if t == ticker:
-                        display_name = name
-                        symbol = sym
-                        break
-
-                # Parse recommendation
-                rec_val = d[15] if len(d) > 15 and d[15] is not None else None
-                rec_str = None
-                if rec_val is not None:
-                    if rec_val >= 0.8:
-                        rec_str = "STRONG_BUY"
-                    elif rec_val >= 0.3:
-                        rec_str = "BUY"
-                    elif rec_val <= -0.8:
-                        rec_str = "STRONG_SELL"
-                    elif rec_val <= -0.3:
-                        rec_str = "SELL"
-                    else:
-                        rec_str = "NEUTRAL"
-
-                all_results[ticker] = AssetPrice(
-                    name=display_name,
-                    symbol=symbol,
-                    ticker=ticker,
-                    market=market,
-                    price=float(d[1]) if d[1] else 0.0,
-                    change=float(d[3]) if d[3] else 0.0,
-                    change_percent=float(d[2]) if d[2] is not None else 0.0,
-                    high=float(d[4]) if d[4] else 0.0,
-                    low=float(d[5]) if d[5] else 0.0,
-                    volume=float(d[6]) if d[6] else 0.0,
-                    timestamp=timestamp,
-                    rsi=float(d[7]) if len(d) > 7 and d[7] is not None else None,
-                    macd=float(d[8]) if len(d) > 8 and d[8] is not None else None,
-                    macd_signal=float(d[9]) if len(d) > 9 and d[9] is not None else None,
-                    sma_50=float(d[11]) if len(d) > 11 and d[11] is not None else None,
-                    sma_200=float(d[12]) if len(d) > 12 and d[12] is not None else None,
-                    recommendation=rec_str,
+                response = _request_with_fallback(
+                    "POST",
+                    endpoint,
+                    json=payload,
+                    headers=_get_headers(),
+                    timeout=15,
+                    proxies=PROXIES,
+                    verify=False,
                 )
-            except (IndexError, TypeError, ValueError) as exc:
-                print(f"[crypto_price] Parse error for {item.get('s', '?')}: {exc}")
-                all_results[item.get("s", "?")] = None
+                response.raise_for_status()
+                data = response.json()
+            except Exception as exc:
+                print(f"[crypto_price] Network error for {market} @ {endpoint}: {exc}")
+                continue
+
+            # Only accept this endpoint if it returned data for our tickers.
+            parsed = _scanner_parse(data, m_tickers, market, timestamp)
+            if any(v is not None for v in parsed.values()):
+                all_results.update(parsed)
+                break
+            else:
+                print(f"[crypto_price] No data for {market} @ {endpoint}, trying next.")
+        else:
+            # All endpoints failed -> mark tickers as unavailable.
+            for t in m_tickers:
+                all_results[t] = None
 
     # Return results in the same order as input tickers
     return [all_results.get(t) for t in tickers]
 
 
+# ─── OHLC (candle) data ─────────────────────────────────────────────
+
+# Map our crypto symbols to CoinGecko coin ids so we can fetch candle data.
+COINGECKO_IDS = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "XRP": "ripple",
+    "BNB": "binancecoin",
+    "SOL": "solana",
+    "DOGE": "dogecoin",
+    "ADA": "cardano",
+    "MATIC": "matic-network",
+    "DOT": "polkadot",
+    "LTC": "litecoin",
+    "TRX": "tron",
+    "AVAX": "avalanche-2",
+    "LINK": "chainlink",
+    "UNI": "uniswap",
+    "ETC": "ethereum-classic",
+    "XLM": "stellar",
+    "FIL": "filecoin",
+    "NEAR": "near",
+    "ARB": "arbitrum",
+    "OP": "optimism",
+    "SHIB": "shiba-inu",
+    "USDT": "tether",
+    "DAI": "dai",
+    "MKR": "maker",
+    "ATOM": "cosmos",
+    "ALGO": "algorand",
+    "VET": "vechain",
+    "THETA": "theta-token",
+    "FTM": "fantom",
+    "SAND": "the-sandbox",
+    "MANA": "decentraland",
+    "AXS": "axie-infinity",
+    "GALA": "gala",
+    "EOS": "eos",
+    "ICP": "internet-computer",
+    "HBAR": "hedera-hashgraph",
+    "ONE": "harmony",
+    "KSM": "kusama",
+    "FLOW": "flow",
+    "EGLD": "elrond-erd-2",
+    "XTZ": "tezos",
+}
+
+
+@dataclass
+class Candle:
+    """A single OHLC candle."""
+    timestamp: int          # unix seconds
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+def fetch_ohlc(symbol: str, hours: int = 24, interval: str = "1h") -> Optional[List[Candle]]:
+    """Fetch recent OHLC candles for a crypto symbol from CoinGecko.
+
+    Args:
+        symbol: Our internal symbol, e.g. "BTC".
+        hours: Number of hours of history to request (default 24 -> 24 candles).
+        interval: Candle interval (CoinGecko supports 1h only for this call).
+
+    Returns:
+        List of Candle objects (oldest first), or None on failure.
+    """
+    coin_id = COINGECKO_IDS.get(symbol.upper())
+    if not coin_id:
+        return None
+
+    # CoinGecko OHLC endpoint: days=1 gives ~hourly candles for the last 24h.
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    params = {"vs_currency": "usd", "days": 1}
+    try:
+        response = _request_with_fallback(
+            "GET",
+            url,
+            params=params,
+            headers=_get_headers(),
+            timeout=15,
+            proxies=PROXIES,
+            verify=False,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        print(f"[crypto_price] OHLC fetch error for {symbol}: {exc}")
+        return None
+
+    if not data:
+        return None
+
+    candles: List[Candle] = []
+    seen_hours = set()
+    for row in data:
+        # CoinGecko format: [timestamp_ms, open, high, low, close]
+        ts = int(row[0]) // 1000
+        hour_key = ts // 3600  # bucket by hour to drop duplicate candles
+        if hour_key in seen_hours:
+            continue
+        seen_hours.add(hour_key)
+        candles.append(
+            Candle(
+                timestamp=ts,
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+            )
+        )
+
+    # Keep only the most recent `hours` candles.
+    if len(candles) > hours:
+        candles = candles[-hours:]
+    return candles
+
+
+def fetch_fear_greed_index() -> Optional[AssetPrice]:
+    """Fetch the Crypto Fear & Greed index from alternative.me.
+
+    TradingView's CRYPTOCAP:FEAR ticker is not available via the scanner,
+    so we use the free public Fear & Greed API as a fallback source.
+    """
+    try:
+        response = _request_with_fallback(
+            "GET",
+            "https://api.alternative.me/fng/?limit=1",
+            headers=_get_headers(),
+            timeout=15,
+            proxies=PROXIES,
+            verify=False,
+        )
+        response.raise_for_status()
+        data = response.json()
+        entry = data.get("data", [{}])[0]
+        value = int(entry.get("value", 0))
+        classification = entry.get("value_classification", "")
+    except Exception as exc:
+        print(f"[crypto_price] Fear&Greed fetch error: {exc}")
+        return None
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return AssetPrice(
+        name="شاخص ترس و طمع",
+        symbol="FEAR",
+        ticker="CRYPTOCAP:FEAR",
+        market=MARKET_INDEX,
+        price=float(value),
+        change=0.0,
+        change_percent=0.0,
+        high=0.0,
+        low=0.0,
+        volume=0.0,
+        timestamp=timestamp,
+        recommendation=classification,
+    )
+
+
 def fetch_single_price(ticker: str) -> Optional[AssetPrice]:
     """Fetch a single asset price."""
+    if ticker == "CRYPTOCAP:FEAR":
+        return fetch_fear_greed_index()
     results = fetch_prices([ticker])
     return results[0] if results else None
 
@@ -489,12 +737,12 @@ def format_price_message(asset: AssetPrice, include_ta: bool = False) -> str:
     if asset.market == MARKET_CRYPTO:
         usd_volume = asset.volume * asset.price if asset.price > 0 else 0
         if usd_volume >= 1_000_000:
-            volume_display = f"${usd_volume / 1_000_000:,.2f}M"
+            volume_display = f"{usd_volume / 1_000_000:,.2f}M"
         elif usd_volume >= 1_000:
-            volume_display = f"${usd_volume / 1_000:,.2f}K"
+            volume_display = f"{usd_volume / 1_000:,.2f}K"
         else:
-            volume_display = f"${usd_volume:,.2f}"
-        msg += f"📊 *حجم:* `{volume_display}` *(${asset.symbol.split(':')[-1]})*\n"
+            volume_display = f"{usd_volume:,.2f}"
+        msg += f"📊 *حجم:* `{volume_display}` *({asset.symbol.split(':')[-1]})*\n"
     elif asset.market == MARKET_STOCK:
         msg += f"📊 *حجم:* `{asset.volume:,.0f}` *سهام*\n"
     elif asset.market == MARKET_COMMODITY:
@@ -520,7 +768,7 @@ def format_price_message(asset: AssetPrice, include_ta: bool = False) -> str:
             msg += f"{sma_icon} *SMA200:* `{asset.sma_200:,.2f}`\n"
         if asset.recommendation:
             rec_icon = {
-                "STRONG_BUY": "🟢",
+                "STRONG_BUY": "🟢🟢",
                 "BUY": "🟢",
                 "NEUTRAL": "🟡",
                 "SELL": "🔴",
@@ -683,42 +931,98 @@ class AlertManager:
 # ─── Currency converter ──────────────────────────────────────────────
 
 # Approximate exchange rates (updated periodically)
-# In production, use an API like exchangerate-api.com
 EXCHANGE_RATES = {
-    "USD_IRR": 59700,  # 1 USD = 59,700 Toman (fallback)
-    "USD_TRY": 32.5,   # 1 USD = 32.5 TRY
-    "EUR_USD": 1.08,   # 1 EUR = 1.08 USD
-    "GBP_USD": 1.27,   # 1 GBP = 1.27 USD
+    "USD_IRR": 137500,  # 1 USD = 137,500 Toman (fallback - free-market rate)
+    "USD_TRY": 32.5,    # 1 USD = 32.5 TRY
+    "EUR_USD": 1.08,    # 1 EUR = 1.08 USD
+    "GBP_USD": 1.27,    # 1 GBP = 1.27 USD
 }
+
+# tgju.org page for the free-market USD price (per USD, in Toman)
+_TGju_USD_URL = "https://www.tgju.org/profile/price_dollar_rl"
+
+# Free public currency API (jsDelivr CDN mirror) used as a reliable fallback
+# for the USD/Toman rate when tgju is unreachable.
+_FNG_CURRENCY_API = (
+    "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json"
+)
 
 
 def _fetch_usd_irr_rate() -> Optional[float]:
-    """Try to fetch live USD/IRR rate from a free API."""
+    """Fetch live free-market USD/Toman rate.
+
+    Tries tgju.org first, then falls back to a free public currency API.
+    Returns the price per 1 USD in Toman, or None on failure.
+    """
+    # 1) Try tgju.org (scrapes the live free-market USD price in Toman)
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        BeautifulSoup = None
+
+    if BeautifulSoup is not None:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "fa,en;q=0.9",
+        }
+        try:
+            response = _request_with_fallback(
+                "GET",
+                _TGju_USD_URL,
+                headers=headers,
+                timeout=10,
+                proxies=PROXIES,
+            )
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "lxml")
+            el = soup.select_one("span[data-col='info.last_trade.PDrCotVal']")
+            if el:
+                text = el.get_text(strip=True)
+                persian_digits = "۰۱۲۳۴۵۶۷۸۹"
+                cleaned = text.translate(str.maketrans(persian_digits, "0123456789"))
+                cleaned = re.sub(r"[^\d]", "", cleaned)
+                if cleaned:
+                    rials = int(cleaned)
+                    rate = rials / 10  # to Toman
+                    if rate > 0:
+                        return rate
+        except Exception as exc:
+            print(f"[crypto_price] USD rate (tgju) error: {exc}")
+
+    # 2) Fallback: free public currency API (1 USD in IRR -> Toman)
     try:
         response = _request_with_fallback(
             "GET",
-            "https://api.exchangerate-api.com/v4/latest/USD",
-            timeout=10,
+            _FNG_CURRENCY_API,
+            headers=_get_headers(),
+            timeout=12,
             proxies=PROXIES,
             verify=False,
         )
-        if response.status_code == 200:
-            data = response.json()
-            rate = data.get("rates", {}).get("IRR")
-            if rate and rate > 0:
-                return float(rate) / 10  # Convert to Toman
-    except Exception:
-        pass
+        response.raise_for_status()
+        data = response.json()
+        irr = data.get("usd", {}).get("irr")
+        if irr:
+            rate = float(irr) / 10.0  # IRR -> Toman
+            if rate > 0:
+                return rate
+    except Exception as exc:
+        print(f"[crypto_price] USD rate (api) error: {exc}")
+
     return None
 
 
 # Update USD_IRR rate at import time if possible
 _live_rate = _fetch_usd_irr_rate()
-if _live_rate:
+if _live_rate and _live_rate > 0:
     EXCHANGE_RATES["USD_IRR"] = _live_rate
-    print(f"[crypto_price] Live USD/IRR rate loaded: 1 USD = {_live_rate:,.0f} Toman")
+    print(f"[crypto_price] Live USD/Toman rate loaded: 1 USD = {_live_rate:,.0f} Toman")
 else:
-    print(f"[crypto_price] Using fallback USD/IRR rate: 1 USD = {EXCHANGE_RATES['USD_IRR']:,} Toman")
+    print(f"[crypto_price] Using fallback USD/Toman rate: 1 USD = {EXCHANGE_RATES['USD_IRR']:,} Toman")
 
 # Gold price in Toman (from tgju.org, updated every cycle)
 _gold_price_toman: Optional[int] = None
@@ -733,6 +1037,19 @@ def update_gold_price_toman(price: int) -> None:
 def get_gold_price_toman() -> Optional[int]:
     """Get the cached gold price in Toman."""
     return _gold_price_toman
+
+
+def refresh_usd_irr_rate() -> float:
+    """Refresh the live USD/Toman rate from tgju.org and return it.
+
+    Falls back to the last known/existing value on failure.
+    """
+    global _live_rate
+    rate = _fetch_usd_irr_rate()
+    if rate and rate > 0:
+        _live_rate = rate
+        EXCHANGE_RATES["USD_IRR"] = rate
+    return EXCHANGE_RATES["USD_IRR"]
 
 
 def usd_to_toman(usd: float) -> float:
@@ -764,12 +1081,12 @@ def format_gold_comparison(gold_toman: int, gold_usd: float) -> str:
     gold_toman_per_ounce = gold_toman * 31.1035
     return (
         "🥇 *مقایسه قیمت طلا*\n"
-        "━━━━━━━━\n"
+        "━━━━━━\n"
         f"🇮🇷 *ایران:* `{gold_toman:,}` تومان (هر گرم ۱۸ عیار)\n"
         f"🌍 *جهانی:* `${gold_usd:,.2f}` (XAU/USD - هر اونس)\n"
         f"🔄 *معادل:* `${gold_usd_per_gram:,.2f}` (هر گرم)\n"
         f"🔄 *معادل:* `{gold_toman_per_ounce:,.0f}` تومان (هر اونس)\n"
-        "━━━━━━━━\n"
+        "━━━━━━\n"
         "_منابع: tgju.org و TradingView_"
     )
 
