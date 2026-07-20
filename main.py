@@ -21,8 +21,8 @@ from dotenv import load_dotenv
 
 from gold_price import fetch_gold_price, format_message as format_gold
 from crypto_price import (
-    ASSETS,MARKET_CRYPTO, MARKET_FOREX, MARKET_COMMODITY,MARKET_STOCK,MARKET_INDEX, MARKET_NAMES, AssetPrice,
-    fetch_prices, fetch_single_price, fetch_assets_by_market, get_assets_by_market,format_price_message,format_market_list, get_chart_url,
+    ASSETS,MARKET_CRYPTO, MARKET_FOREX, MARKET_COMMODITY,MARKET_STOCK,MARKET_INDEX, MARKET_NAMES, AssetPrice, Candle,
+    fetch_prices, fetch_single_price, fetch_assets_by_market, get_assets_by_market,format_price_message,format_market_list, get_chart_url, fetch_ohlc,
     AlertManager,  usd_to_toman,  toman_to_usd,  format_currency_conversion,  format_gold_comparison,  update_gold_price_toman,  download_chart_image, EXCHANGE_RATES, refresh_usd_irr_rate,
 )
 from telegram_bot import TelegramNotifier, escape_markdown
@@ -347,6 +347,9 @@ def main() -> None:
         elif data.startswith("cmd_asset_"):
             ticker = data.replace("cmd_asset_", "")
             _send_single_asset(notifier, chat_id, ticker)
+        elif data.startswith("cmd_ohlc_"):
+            ticker = data.replace("cmd_ohlc_", "")
+            _send_ohlc_table(notifier, chat_id, ticker)
         elif data.startswith("cmd_chart_"):
             ticker = data.replace("cmd_chart_", "")
             _send_chart(notifier, chat_id, ticker)
@@ -682,13 +685,72 @@ def _send_single_asset(notifier: TelegramNotifier, chat_id: str, ticker: str) ->
         return
 
     # Send price with TA
+    buttons = [
+        [("🔄 تازه‌سازی", f"cmd_asset_{ticker}")],
+        [("📈 نمودار", f"cmd_chart_{ticker}")],
+        [("📈 بالاتر از", f"cmd_alert_above_{ticker}"), ("📉 پایین‌تر از", f"cmd_alert_below_{ticker}")],
+    ]
+    # Add the OHLC table button only for crypto assets (CoinGecko-backed).
+    if asset.market == MARKET_CRYPTO:
+        buttons.insert(1, [("📋 جدول ۲۴ ساعته", f"cmd_ohlc_{ticker}")])
+    buttons.append([("🏠 منوی اصلی", "cmd_back")])
     notifier.send_message(
         format_price_message(asset, include_ta=True),
+        buttons=buttons,
+        chat_id=chat_id,
+    )
+
+
+def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str) -> None:
+    """Fetch and send the 24h hourly OHLC table for a crypto asset."""
+    # Resolve display name + symbol from the asset list.
+    name, symbol = ticker, ticker.split(":")[-1]
+    for n, t, sym, _ in ASSETS:
+        if t == ticker:
+            name, symbol = n, sym
+            break
+
+    notifier.send_message(
+        f"⏳ در حال دریافت جدول قیمت {name} (۲۴ ساعت گذشته)...",
+        chat_id=chat_id,
+    )
+
+    candles = fetch_ohlc(symbol, hours=24, interval="1h")
+    if not candles:
+        notifier.send_message(
+            "❌ *خطا در دریافت داده‌های کندل*\nکمی بعد دوباره امتحان کن.",
+            buttons=[
+                [("🔄 تلاش مجدد", f"cmd_ohlc_{ticker}"), ("🏠 منو", "cmd_back")],
+            ],
+            chat_id=chat_id,
+        )
+        return
+
+    # Build a monospaced table (newest candle last).
+    lines = []
+    lines.append(f"📊 *جدول قیمت {escape_markdown(name)}* (۱ ساعته)")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("🕐 زمان   O/H/L/C (USD)")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    for c in candles:
+        t = datetime.fromtimestamp(c.timestamp).strftime("%m/%d %H:00")
+        row = f"{t} │ {c.open:>8.2f} / {c.high:>8.2f} / {c.low:>8.2f} / {c.close:>8.2f}"
+        lines.append(row)
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    first = candles[0]
+    last = candles[-1]
+    change = last.close - first.open
+    change_pct = (change / first.open * 100) if first.open else 0.0
+    arrow = "📈" if change >= 0 else "📉"
+    lines.append(
+        f"{arrow} تغییر ۲۴س: `{change:+.2f}` ({change_pct:+.2f}%)"
+    )
+
+    notifier.send_message(
+        "```\n" + "\n".join(lines) + "\n```",
         buttons=[
-            [("🔄 تازه‌سازی", f"cmd_asset_{ticker}")],
-            [("📈 نمودار", f"cmd_chart_{ticker}")],
-            [("📈 بالاتر از", f"cmd_alert_above_{ticker}"), ("📉 پایین‌تر از", f"cmd_alert_below_{ticker}")],
-            [("🏠 منوی اصلی", "cmd_back")],
+            [("🔄 تازه‌سازی", f"cmd_ohlc_{ticker}")],
+            [("🔙 برگشت", f"cmd_asset_{ticker}"), ("🏠 منوی اصلی", "cmd_back")],
         ],
         chat_id=chat_id,
     )
