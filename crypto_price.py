@@ -1,9 +1,4 @@
-"""
-crypto_price.py
-Module for fetching live prices from TradingView.
-Supports multiple markets: Crypto, Forex, Commodities, Stocks, Indices.
-Also provides technical analysis (RSI, MACD, SMA) and chart URLs.
-"""
+
 from __future__ import annotations
 import json
 import re
@@ -33,6 +28,8 @@ MARKET_NAMES = {
     MARKET_STOCK: "📈 سهام آمریکا",
     MARKET_INDEX: "📊 شاخص‌ها",
 }
+
+
 
 # ─── Asset definitions ───────────────────────────────────────────────
 # Format: (display_name, ticker, symbol, market)
@@ -492,12 +489,12 @@ def format_price_message(asset: AssetPrice, include_ta: bool = False) -> str:
     if asset.market == MARKET_CRYPTO:
         usd_volume = asset.volume * asset.price if asset.price > 0 else 0
         if usd_volume >= 1_000_000:
-            volume_display = f"{usd_volume / 1_000_000:,.2f}M"
+            volume_display = f"${usd_volume / 1_000_000:,.2f}M"
         elif usd_volume >= 1_000:
-            volume_display = f"{usd_volume / 1_000:,.2f}K"
+            volume_display = f"${usd_volume / 1_000:,.2f}K"
         else:
-            volume_display = f"{usd_volume:,.2f}"
-        msg += f"📊 *حجم:* `{volume_display}` *({asset.symbol.split(':')[-1]})*\n"
+            volume_display = f"${usd_volume:,.2f}"
+        msg += f"📊 *حجم:* `{volume_display}` *(${asset.symbol.split(':')[-1]})*\n"
     elif asset.market == MARKET_STOCK:
         msg += f"📊 *حجم:* `{asset.volume:,.0f}` *سهام*\n"
     elif asset.market == MARKET_COMMODITY:
@@ -523,7 +520,7 @@ def format_price_message(asset: AssetPrice, include_ta: bool = False) -> str:
             msg += f"{sma_icon} *SMA200:* `{asset.sma_200:,.2f}`\n"
         if asset.recommendation:
             rec_icon = {
-                "STRONG_BUY": "🟢🟢",
+                "STRONG_BUY": "🟢",
                 "BUY": "🟢",
                 "NEUTRAL": "🟡",
                 "SELL": "🔴",
@@ -686,73 +683,42 @@ class AlertManager:
 # ─── Currency converter ──────────────────────────────────────────────
 
 # Approximate exchange rates (updated periodically)
+# In production, use an API like exchangerate-api.com
 EXCHANGE_RATES = {
-    "USD_IRR": 92000,  # 1 USD = 92,000 Toman (fallback - free-market rate)
+    "USD_IRR": 59700,  # 1 USD = 59,700 Toman (fallback)
     "USD_TRY": 32.5,   # 1 USD = 32.5 TRY
     "EUR_USD": 1.08,   # 1 EUR = 1.08 USD
     "GBP_USD": 1.27,   # 1 GBP = 1.27 USD
 }
 
-# tgju.org page for the free-market USD price (per USD, in Toman)
-_TGju_USD_URL = "https://www.tgju.org/profile/price_dollar_rl"
-
 
 def _fetch_usd_irr_rate() -> Optional[float]:
-    """Fetch live free-market USD/Toman rate from tgju.org.
-
-    Returns the price per 1 USD in Toman, or None on failure.
-    """
-    try:
-        from bs4 import BeautifulSoup
-    except ImportError:
-        return None
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "fa,en;q=0.9",
-    }
+    """Try to fetch live USD/IRR rate from a free API."""
     try:
         response = _request_with_fallback(
             "GET",
-            _TGju_USD_URL,
-            headers=headers,
+            "https://api.exchangerate-api.com/v4/latest/USD",
             timeout=10,
             proxies=PROXIES,
+            verify=False,
         )
-        response.raise_for_status()
-    except Exception as exc:
-        print(f"[crypto_price] USD rate fetch error: {exc}")
-        return None
-
-    try:
-        soup = BeautifulSoup(response.text, "lxml")
-        el = soup.select_one("span[data-col='info.last_trade.PDrCotVal']")
-        if not el:
-            return None
-        text = el.get_text(strip=True)
-        persian_digits = "۰۱۲۳۴۵۶۷۸۹"
-        cleaned = text.translate(str.maketrans(persian_digits, "0123456789"))
-        cleaned = re.sub(r"[^\d]", "", cleaned)
-        if not cleaned:
-            return None
-        rials = int(cleaned)
-        return rials / 10  # to Toman
-    except Exception as exc:
-        print(f"[crypto_price] USD rate parse error: {exc}")
-        return None
+        if response.status_code == 200:
+            data = response.json()
+            rate = data.get("rates", {}).get("IRR")
+            if rate and rate > 0:
+                return float(rate) / 10  # Convert to Toman
+    except Exception:
+        pass
+    return None
 
 
 # Update USD_IRR rate at import time if possible
 _live_rate = _fetch_usd_irr_rate()
-if _live_rate and _live_rate > 0:
+if _live_rate:
     EXCHANGE_RATES["USD_IRR"] = _live_rate
-    print(f"[crypto_price] Live USD/Toman rate loaded: 1 USD = {_live_rate:,.0f} Toman")
+    print(f"[crypto_price] Live USD/IRR rate loaded: 1 USD = {_live_rate:,.0f} Toman")
 else:
-    print(f"[crypto_price] Using fallback USD/Toman rate: 1 USD = {EXCHANGE_RATES['USD_IRR']:,} Toman")
+    print(f"[crypto_price] Using fallback USD/IRR rate: 1 USD = {EXCHANGE_RATES['USD_IRR']:,} Toman")
 
 # Gold price in Toman (from tgju.org, updated every cycle)
 _gold_price_toman: Optional[int] = None
@@ -767,19 +733,6 @@ def update_gold_price_toman(price: int) -> None:
 def get_gold_price_toman() -> Optional[int]:
     """Get the cached gold price in Toman."""
     return _gold_price_toman
-
-
-def refresh_usd_irr_rate() -> float:
-    """Refresh the live USD/Toman rate from tgju.org and return it.
-
-    Falls back to the last known/existing value on failure.
-    """
-    global _live_rate
-    rate = _fetch_usd_irr_rate()
-    if rate and rate > 0:
-        _live_rate = rate
-        EXCHANGE_RATES["USD_IRR"] = rate
-    return EXCHANGE_RATES["USD_IRR"]
 
 
 def usd_to_toman(usd: float) -> float:
@@ -811,12 +764,12 @@ def format_gold_comparison(gold_toman: int, gold_usd: float) -> str:
     gold_toman_per_ounce = gold_toman * 31.1035
     return (
         "🥇 *مقایسه قیمت طلا*\n"
-        "━━━━━━\n"
+        "━━━━━━━━\n"
         f"🇮🇷 *ایران:* `{gold_toman:,}` تومان (هر گرم ۱۸ عیار)\n"
         f"🌍 *جهانی:* `${gold_usd:,.2f}` (XAU/USD - هر اونس)\n"
         f"🔄 *معادل:* `${gold_usd_per_gram:,.2f}` (هر گرم)\n"
         f"🔄 *معادل:* `{gold_toman_per_ounce:,.0f}` تومان (هر اونس)\n"
-        "━━━━━━\n"
+        "━━━━━━━━\n"
         "_منابع: tgju.org و TradingView_"
     )
 
