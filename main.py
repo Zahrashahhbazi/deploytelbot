@@ -726,25 +726,44 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str) -> N
         )
         return
 
+    # Pick decimal places based on price magnitude (tiny coins like SHIB
+    # need more decimals so they don't collapse to "0.00").
+    ref_price = max(abs(candles[-1].close), abs(candles[0].open), 1e-12)
+    if ref_price < 0.001:
+        decimals = 10
+    elif ref_price < 1:
+        decimals = 6
+    elif ref_price < 100:
+        decimals = 4
+    else:
+        decimals = 2
+    fmt = f">{{:>14,.{decimals}f}}"
+
     # Build a monospaced table (newest candle last).
     lines = []
     lines.append(f"📊 *جدول قیمت {escape_markdown(name)}* (۱ ساعته - ۲۴ ساعت)")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🕐 زمان     بازشدن  بیشترین  کمترین  بسته‌شدن")
-    lines.append("            (Open)   (High)   (Low)    (Close)")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🕐 زمان       بازشدن    بیشترین    کمترین   بسته‌شدن")
+    lines.append("              (Open)     (High)     (Low)    (Close)")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     for c in candles:
         t = datetime.fromtimestamp(c.timestamp).strftime("%m/%d %H:00")
-        row = f"{t} │ {c.open:>8.2f} {c.high:>8.2f} {c.low:>8.2f} {c.close:>8.2f}"
+        row = (
+            f"{t} │"
+            + fmt.format(c.open)
+            + fmt.format(c.high)
+            + fmt.format(c.low)
+            + fmt.format(c.close)
+        )
         lines.append(row)
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     first = candles[0]
     last = candles[-1]
     change = last.close - first.open
     change_pct = (change / first.open * 100) if first.open else 0.0
     arrow = "📈" if change >= 0 else "📉"
     lines.append(
-        f"{arrow} تغییر ۲۴س: `{change:+.2f}` ({change_pct:+.2f}%)"
+        f"{arrow} تغییر ۲۴س: `{change:+,.{decimals}f}` ({change_pct:+.2f}%)"
     )
 
     notifier.send_message(

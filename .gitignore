@@ -1,0 +1,57 @@
+# ─── Secrets & environment ───────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── Python / virtualenv ────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.venv-1/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ─── Runtime data (auto-generated) ──────────────────────────────────
+.last_price
+.last_price.*
+alerts.json
+
+# ─── Debug / trace / test leftovers ─────────────────────────────────
+_trace.py
+_trace.txt
+_traceout.txt
+_t.txt
+_v.txt
+_testout.txt
+_test_local.py
+
+# ─── Local Windows launchers & helpers ──────────────────────────────
+run_bot.bat
+run_bot.ps1
+run_bot_hidden.vbs
+deploy.ps1
+setup_helper.py
+_create_task.ps1
+_proc_monitor.ps1
+_proc_monitor.txt
+
+# ─── Unused / legacy code ───────────────────────────────────────────
+bot.py
+main_features.py
+
+# ─── Other platforms (this project deploys on Railway) ──────────────
+fly.toml
+render.yaml
+cloudflare_worker.js
+startup.sh
+
+# ─── Editors / OS ───────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
