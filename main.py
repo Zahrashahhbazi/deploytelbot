@@ -728,15 +728,16 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str) -> N
 
     # Build a monospaced table (newest candle last).
     lines = []
-    lines.append(f"📊 *جدول قیمت {escape_markdown(name)}* (۱ ساعته)")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("🕐 زمان   O/H/L/C (USD)")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 *جدول قیمت {escape_markdown(name)}* (۱ ساعته - ۲۴ ساعت)")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🕐 زمان     بازشدن  بیشترین  کمترین  بسته‌شدن")
+    lines.append("            (Open)   (High)   (Low)    (Close)")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     for c in candles:
         t = datetime.fromtimestamp(c.timestamp).strftime("%m/%d %H:00")
-        row = f"{t} │ {c.open:>8.2f} / {c.high:>8.2f} / {c.low:>8.2f} / {c.close:>8.2f}"
+        row = f"{t} │ {c.open:>8.2f} {c.high:>8.2f} {c.low:>8.2f} {c.close:>8.2f}"
         lines.append(row)
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     first = candles[0]
     last = candles[-1]
     change = last.close - first.open
