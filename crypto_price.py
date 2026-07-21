@@ -5,6 +5,7 @@ Supports multiple markets: Crypto, Forex, Commodities, Stocks, Indices.
 Also provides technical analysis (RSI, MACD, SMA) and chart URLs.
 """
 from __future__ import annotations
+import html
 import json
 import re
 import time
@@ -599,6 +600,192 @@ def fetch_ohlc(symbol: str, hours: int = 24, interval: str = "1h") -> Optional[L
     if len(candles) > hours:
         candles = candles[-hours:]
     return candles
+
+
+BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+MAX_KLINES_PER_REQUEST = 1000
+
+
+def _to_binance_symbol(ticker: str) -> str:
+    if ":" in ticker:
+        return ticker.split(":")[-1]
+    return ticker
+
+
+def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> Optional[List[Candle]]:
+    """Fetch Binance OHLC candles with pagination.
+
+    Binance limits each request to 1000 candles, so for 1 year (~8760 hours)
+    we paginate backwards using endTime. Returns oldest-first list of Candle.
+    """
+    binance_symbol = _to_binance_symbol(symbol)
+    target = hours
+    limit_per_request = MAX_KLINES_PER_REQUEST
+    raw: List[List] = []
+
+    for _ in range((target // limit_per_request) + 5):
+        if len(raw) >= target:
+            break
+        remaining = target - len(raw)
+        fetch_limit = min(limit_per_request, remaining)
+
+        params = {
+            "symbol": binance_symbol,
+            "interval": interval,
+            "limit": fetch_limit,
+        }
+        if raw:
+            oldest_open_time = raw[-1][0]
+            params["endTime"] = oldest_open_time - 1
+
+        try:
+            response = _request_with_fallback(
+                "GET",
+                BINANCE_KLINES,
+                params=params,
+                headers=_get_headers(),
+                timeout=20,
+                proxies=PROXIES,
+                verify=False,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not data:
+                break
+        except Exception as exc:
+            print(f"[crypto_price] Binance klines error for {binance_symbol}: {exc}")
+            break
+
+        raw.extend(data)
+        if len(data) < fetch_limit:
+            break
+
+    if not raw:
+        return None
+
+    seen = set()
+    candles: List[Candle] = []
+    for row in raw:
+        ts = int(row[0]) // 1000
+        if ts in seen:
+            continue
+        seen.add(ts)
+        candles.append(
+            Candle(
+                timestamp=ts,
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+            )
+        )
+
+    candles.sort(key=lambda c: c.timestamp)
+    while len(candles) > target:
+        candles.pop(0)
+    return candles if candles else None
+
+
+def _ohlc_price_decimals(candles: List[Candle]) -> int:
+    """Pick decimal places so tiny coins (e.g. SHIB) stay readable in the table."""
+    ref = max(
+        max(abs(c.open), abs(c.high), abs(c.low), abs(c.close)) for c in candles
+    )
+    ref = max(ref, 1e-12)
+    if ref < 0.001:
+        return 8
+    if ref < 1:
+        return 6
+    if ref < 100:
+        return 4
+    return 2
+
+
+def _build_ohlc_pre_table(candles: List[Candle], decimals: int) -> str:
+    """Build a box-drawing OHLC table for Telegram <pre> blocks."""
+
+    def fp(value: float) -> str:
+        return f"{value:,.{decimals}f}"
+
+    time_w = 11
+    price_w = max(
+        len(fp(v))
+        for c in candles
+        for v in (c.open, c.high, c.low, c.close)
+    )
+    close_w = price_w + 1  # room for ▲/▼
+
+    def cell(text: str, width: int) -> str:
+        return text.rjust(width)
+
+    top = (
+        f"┌{'─' * time_w}┬{'─' * price_w}┬{'─' * price_w}"
+        f"┬{'─' * price_w}┬{'─' * close_w}┐"
+    )
+    header = (
+        f"│{cell('Time', time_w)}│{cell('Open', price_w)}│{cell('High', price_w)}"
+        f"│{cell('Low', price_w)}│{cell('Close', close_w)}│"
+    )
+    mid = (
+        f"├{'─' * time_w}┼{'─' * price_w}┼{'─' * price_w}"
+        f"┼{'─' * price_w}┼{'─' * close_w}┤"
+    )
+    bottom = (
+        f"└{'─' * time_w}┴{'─' * price_w}┴{'─' * price_w}"
+        f"┴{'─' * price_w}┴{'─' * close_w}┘"
+    )
+
+    rows = [top, header, mid]
+    for candle in candles:
+        t = datetime.fromtimestamp(candle.timestamp).strftime("%m/%d %H:%M")
+        direction = "▲" if candle.close >= candle.open else "▼"
+        rows.append(
+            f"│{cell(t, time_w)}"
+            f"│{cell(fp(candle.open), price_w)}"
+            f"│{cell(fp(candle.high), price_w)}"
+            f"│{cell(fp(candle.low), price_w)}"
+            f"│{cell(fp(candle.close) + direction, close_w)}│"
+        )
+    rows.append(bottom)
+    return "\n".join(rows)
+
+
+def format_ohlc_table(name: str, symbol: str, candles: List[Candle]) -> str:
+    """Format a 24h OHLC table as an HTML Telegram message."""
+    decimals = _ohlc_price_decimals(candles)
+
+    def fp(value: float) -> str:
+        return f"{value:,.{decimals}f}"
+
+    first, last = candles[0], candles[-1]
+    change = last.close - first.open
+    change_pct = (change / first.open * 100) if first.open else 0.0
+    period_high = max(c.high for c in candles)
+    period_low = min(c.low for c in candles)
+    green_count = sum(1 for c in candles if c.close >= c.open)
+    red_count = len(candles) - green_count
+
+    arrow = "📈" if change >= 0 else "📉"
+    sign = "+" if change >= 0 else ""
+    updated = datetime.fromtimestamp(last.timestamp).strftime("%Y-%m-%d %H:%M")
+
+    table = html.escape(_build_ohlc_pre_table(candles, decimals))
+    safe_name = html.escape(name)
+    safe_symbol = html.escape(symbol)
+
+    return (
+        f"<b>📊 جدول OHLC — {safe_name}</b>\n"
+        f"<i>{safe_symbol} · کندل ۱س · ۲۴ ساعت · USD</i>\n\n"
+        f"<pre>{table}</pre>\n"
+        f"<b>{arrow} خلاصه ۲۴ ساعت</b>\n"
+        f"▫️ تغییر: <code>{sign}{fp(change)} ({sign}{change_pct:.2f}%)</code>\n"
+        f"▫️ سقف: <code>{fp(period_high)}</code>  ·  "
+        f"کف: <code>{fp(period_low)}</code>\n"
+        f"▫️ باز: <code>{fp(first.open)}</code>  →  "
+        f"بسته: <code>{fp(last.close)}</code>\n"
+        f"▫️ کندل: 🟢 {green_count}  ·  🔴 {red_count}\n"
+        f"🕒 آخرین: <i>{updated}</i>"
+    )
 
 
 def fetch_fear_greed_index() -> Optional[AssetPrice]:

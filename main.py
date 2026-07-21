@@ -22,7 +22,8 @@ from dotenv import load_dotenv
 from gold_price import fetch_gold_price, format_message as format_gold
 from crypto_price import (
     ASSETS,MARKET_CRYPTO, MARKET_FOREX, MARKET_COMMODITY,MARKET_STOCK,MARKET_INDEX, MARKET_NAMES, AssetPrice, Candle,
-    fetch_prices, fetch_single_price, fetch_assets_by_market, get_assets_by_market,format_price_message,format_market_list, get_chart_url, fetch_ohlc,
+    fetch_prices, fetch_single_price, fetch_assets_by_market, get_assets_by_market,format_price_message,format_market_list, get_chart_url, fetch_ohlc, format_ohlc_table,
+    fetch_binance_ohlc,
     AlertManager,  usd_to_toman,  toman_to_usd,  format_currency_conversion,  format_gold_comparison,  update_gold_price_toman,  download_chart_image, EXCHANGE_RATES, refresh_usd_irr_rate,
 )
 from telegram_bot import TelegramNotifier, escape_markdown
@@ -701,9 +702,36 @@ def _send_single_asset(notifier: TelegramNotifier, chat_id: str, ticker: str) ->
     )
 
 
+def _create_ohlc_excel(name: str, symbol: str, candles: List[Candle]) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from io import BytesIO
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{symbol} OHLC"
+    ws.append(["Time", "Open", "High", "Low", "Close"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill("solid", fgColor="DDDDDD")
+
+    for c in candles:
+        ws.append([
+            datetime.fromtimestamp(c.timestamp).strftime("%Y-%m-%d %H:%M"),
+            c.open,
+            c.high,
+            c.low,
+            c.close,
+        ])
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+
 def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str) -> None:
-    """Fetch and send the 24h hourly OHLC table for a crypto asset."""
-    # Resolve display name + symbol from the asset list.
+    """Fetch historical OHLC from Binance and send as Excel file."""
     name, symbol = ticker, ticker.split(":")[-1]
     for n, t, sym, _ in ASSETS:
         if t == ticker:
@@ -711,69 +739,118 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str) -> N
             break
 
     notifier.send_message(
-        f"⏳ در حال دریافت جدول قیمت {name} (۲۴ ساعت گذشته)...",
+        f"⏳ در حال دریافت داده‌های تاریخی {name} (حداکثر ۱ سال) ...",
         chat_id=chat_id,
     )
 
-    candles = fetch_ohlc(symbol, hours=24, interval="1h")
-    if not candles:
+    candles = fetch_binance_ohlc(symbol, hours=8760, interval="1h")
+    if not candles or len(candles) < 2:
+        candles = fetch_ohlc(symbol, hours=24, interval="1h")
+        if not candles:
+            notifier.send_message(
+                "❌ *خطا در دریافت داده‌های کندل*\nکمی بعد دوباره امتحان کن.",
+                buttons=[
+                    [("🔄 تلاش مجدد", f"cmd_ohlc_{ticker}"), ("🏠 منو", "cmd_back")],
+                ],
+                chat_id=chat_id,
+            )
+            return
+
+        ref_price = max(abs(candles[-1].close), abs(candles[0].open), 1e-12)
+        if ref_price < 0.001:
+            decimals = 10
+        elif ref_price < 1:
+            decimals = 6
+        elif ref_price < 100:
+            decimals = 4
+        else:
+            decimals = 2
+
+        def _candle_emoji(c):
+            if c.close > c.open:
+                return "🟢"
+            elif c.close < c.open:
+                return "🔴"
+            return "⚪"
+
+        lines: List[str] = []
+        lines.append(f"📊 *{escape_markdown(name)} — ۲۴ ساعت گذشته* (CoinGecko)")
+        lines.append("⏱ تایم‌فریم: ۱ ساعته")
+        lines.append("")
+        lines.append("🕐    بازشدن     بیشترین     کمترین    بسته‌شدن")
+        lines.append("       Open        High        Low       Close")
+        lines.append("")
+        for c in candles:
+            t = datetime.fromtimestamp(c.timestamp).strftime("%H:00")
+            emoji = _candle_emoji(c)
+            lines.append(
+                f"{emoji} {t} │ {c.open:>12,.{decimals}f} │ "
+                f"{c.high:>12,.{decimals}f} │ {c.low:>12,.{decimals}f} │ "
+                f"{c.close:>12,.{decimals}f}"
+            )
+        lines.append("")
+
+        strongest = max(candles, key=lambda x: x.high - x.low)
+        weakest = min(candles, key=lambda x: x.high - x.low)
+        first = candles[0]
+        last = candles[-1]
+        change = last.close - first.open
+        change_pct = (change / first.open * 100) if first.open else 0.0
+        trend_direction = "صعودی 📈" if change >= 0 else "نزولی 📉"
+        sign = "+" if change >= 0 else ""
+
+        lines.append(f"📌 روند کلی: {trend_direction}")
+        lines.append(f"🕒 {sign}{change:,.{decimals}f} دلار ({sign}{change_pct:.2f}%)")
+        lines.append(
+            f"🏆 بالاترین نوسان: {strongest.high:,.{decimals}f} - {strongest.low:,.{decimals}f}"
+            f" ({strongest.high - strongest.low:,.{decimals}f})"
+        )
+        lines.append(
+            f"📉 کمترین نوسان: {weakest.high:,.{decimals}f} - {weakest.low:,.{decimals}f}"
+            f" ({weakest.high - weakest.low:,.{decimals}f})"
+        )
+        lines.append("")
+
         notifier.send_message(
-            "❌ *خطا در دریافت داده‌های کندل*\nکمی بعد دوباره امتحان کن.",
+            "```\n" + "\n".join(lines) + "\n```",
             buttons=[
-                [("🔄 تلاش مجدد", f"cmd_ohlc_{ticker}"), ("🏠 منو", "cmd_back")],
+                [("🔄 تازه‌سازی", f"cmd_ohlc_{ticker}")],
+                [("🔙 برگشت", f"cmd_asset_{ticker}"), ("🏠 منوی اصلی", "cmd_back")],
             ],
             chat_id=chat_id,
         )
         return
 
-    # Pick decimal places based on price magnitude (tiny coins like SHIB
-    # need more decimals so they don't collapse to "0.00").
-    ref_price = max(abs(candles[-1].close), abs(candles[0].open), 1e-12)
-    if ref_price < 0.001:
-        decimals = 10
-    elif ref_price < 1:
-        decimals = 6
-    elif ref_price < 100:
-        decimals = 4
-    else:
-        decimals = 2
-    fmt = f">{{:>14,.{decimals}f}}"
-
-    # Build a monospaced table (newest candle last).
-    lines = []
-    lines.append(f"📊 *جدول قیمت {escape_markdown(name)}* (۱ ساعته - ۲۴ ساعت)")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🕐 زمان       بازشدن    بیشترین    کمترین   بسته‌شدن")
-    lines.append("              (Open)     (High)     (Low)    (Close)")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    for c in candles:
-        t = datetime.fromtimestamp(c.timestamp).strftime("%m/%d %H:00")
-        row = (
-            f"{t} │"
-            + fmt.format(c.open)
-            + fmt.format(c.high)
-            + fmt.format(c.low)
-            + fmt.format(c.close)
+    try:
+        file_bytes = _create_ohlc_excel(name, symbol, candles)
+        filename = f"{symbol}_OHLC_{len(candles)}candles.xlsx"
+        caption = (
+            f"📊 *{escape_markdown(name)}*\n"
+            f"🕒 *تعداد کندل:* `{len(candles)}`\n"
+            f"⏱ *تایم‌فریم:* ۱ ساعته\n"
+            "━━━━━━━━━━\n"
+            f"🕒 آخرین به‌روزرسانی: `{datetime.now().strftime('%Y-%m-%d %H:%M')}`"
         )
-        lines.append(row)
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    first = candles[0]
-    last = candles[-1]
-    change = last.close - first.open
-    change_pct = (change / first.open * 100) if first.open else 0.0
-    arrow = "📈" if change >= 0 else "📉"
-    lines.append(
-        f"{arrow} تغییر ۲۴س: `{change:+,.{decimals}f}` ({change_pct:+.2f}%)"
-    )
-
-    notifier.send_message(
-        "```\n" + "\n".join(lines) + "\n```",
-        buttons=[
-            [("🔄 تازه‌سازی", f"cmd_ohlc_{ticker}")],
-            [("🔙 برگشت", f"cmd_asset_{ticker}"), ("🏠 منوی اصلی", "cmd_back")],
-        ],
-        chat_id=chat_id,
-    )
+        notifier.send_document(
+            chat_id=chat_id,
+            document_bytes=file_bytes,
+            filename=filename,
+            caption=caption,
+            parse_mode="Markdown",
+            buttons=[
+                [("🔄 تازه‌سازی", f"cmd_ohlc_{ticker}")],
+                [("🔙 برگشت", f"cmd_asset_{ticker}"), ("🏠 منوی اصلی", "cmd_back")],
+            ],
+        )
+    except Exception as exc:
+        print(f"[main] Excel send error for {ticker}: {exc}")
+        notifier.send_message(
+            "❌ *خطا در ساخت فایل اکسل*\nکمی بعد دوباره امتحان کن.",
+            buttons=[
+                [("🔄 تلاش مجدد", f"cmd_ohlc_{ticker}"), ("🏠 منو", "cmd_back")],
+            ],
+            chat_id=chat_id,
+        )
 
 
 def _send_chart(notifier: TelegramNotifier, chat_id: str, ticker: str) -> None:

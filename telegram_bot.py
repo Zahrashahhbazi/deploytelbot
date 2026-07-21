@@ -276,6 +276,45 @@ class TelegramNotifier:
             return updates
         return []
 
+    def send_document(
+        self,
+        chat_id: str,
+        document_bytes: bytes,
+        filename: str,
+        caption: str = "",
+        parse_mode: str = "Markdown",
+        buttons: Optional[List[List[Tuple[str, str]]]] = None,
+    ) -> None:
+        """Send a file (e.g., Excel/CSV) to a chat."""
+        from urllib3.filepost import encode_multipart_formdata
+
+        fields = [
+            ("chat_id", str(chat_id)),
+            ("caption", caption),
+            ("parse_mode", parse_mode),
+            ("document", (filename, document_bytes, "application/octet-stream")),
+        ]
+        if buttons:
+            fields.append((
+                "reply_markup",
+                json.dumps({"inline_keyboard": _build_inline_keyboard(buttons)}),
+            ))
+
+        data, content_type = encode_multipart_formdata(fields)
+        url = self._api_url("sendDocument")
+        try:
+            resp = self._http.request(
+                "POST",
+                url,
+                body=data,
+                headers={"Content-Type": content_type},
+                timeout=60.0,
+            )
+            if resp.status != 200:
+                print(f"[telegram] HTTP {resp.status} on sendDocument: {resp.data[:200]}")
+        except Exception as exc:
+            print(f"[telegram] Error on sendDocument: {exc}")
+
     def send_photo(
         self,
         chat_id: str,
