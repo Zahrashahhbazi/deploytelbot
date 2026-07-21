@@ -607,17 +607,77 @@ MAX_KLINES_PER_REQUEST = 1000
 
 
 def _to_binance_symbol(ticker: str) -> str:
-    if ":" in ticker:
-        return ticker.split(":")[-1]
-    return ticker
+    s = ticker.split(":")[-1].upper()
+    if not (s.endswith("USDT") or s.endswith("BUSD") or s.endswith("USDC") or s.endswith("FDUSD") or s.endswith("USD")):
+        s += "USDT"
+    return s
 
 
 def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> Optional[List[Candle]]:
-    """Fetch Binance OHLC candles with pagination.
-
-    Binance limits each request to 1000 candles, so for 1 year (~8760 hours)
-    we paginate backwards using endTime. Returns oldest-first list of Candle.
+    """Fetch OHLC candles with multi-exchange pagination (KuCoin, Binance, CoinGecko).
+    Default fetches 1 year (8760 hours) of 1h candles. Returns oldest-first list of Candle.
     """
+    raw_symbol = symbol.split(":")[-1].upper()
+    base_symbol = raw_symbol.replace("USDT", "").replace("USD", "").replace("-", "").replace("_", "")
+    if not base_symbol:
+        base_symbol = "BTC"
+
+    now = int(time.time())
+    target_start = now - hours * 3600
+
+    # 1) Try KuCoin (reliable global REST API for historical candles)
+    kucoin_symbol = f"{base_symbol}-USDT"
+    candles: List[Candle] = []
+    current_end = now
+    try:
+        for _ in range((hours // 1200) + 5):
+            r = _request_with_fallback(
+                "GET",
+                "https://api.kucoin.com/api/v1/market/candles",
+                params={
+                    "symbol": kucoin_symbol,
+                    "type": "1hour",
+                    "startAt": target_start,
+                    "endAt": current_end,
+                },
+                headers=_get_headers(),
+                timeout=12,
+                proxies=PROXIES,
+                verify=False,
+            )
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                if not data:
+                    break
+                for row in data:
+                    candles.append(
+                        Candle(
+                            timestamp=int(row[0]),
+                            open=float(row[1]),
+                            high=float(row[3]),
+                            low=float(row[4]),
+                            close=float(row[2]),
+                        )
+                    )
+                oldest_ts = int(data[-1][0])
+                if oldest_ts <= target_start:
+                    break
+                current_end = oldest_ts - 1
+            else:
+                break
+    except Exception as exc:
+        print(f"[crypto_price] KuCoin OHLC fetch error for {kucoin_symbol}: {exc}")
+
+    if len(candles) >= 10:
+        seen = set()
+        unique: List[Candle] = []
+        for c in sorted(candles, key=lambda x: x.timestamp):
+            if c.timestamp not in seen:
+                seen.add(c.timestamp)
+                unique.append(c)
+        return unique
+
+    # 2) Fallback to Binance
     binance_symbol = _to_binance_symbol(symbol)
     target = hours
     limit_per_request = MAX_KLINES_PER_REQUEST
@@ -648,42 +708,45 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> 
                 proxies=PROXIES,
                 verify=False,
             )
-            response.raise_for_status()
-            data = response.json()
-            if not data:
+            if response.status_code == 200:
+                data = response.json()
+                if not data:
+                    break
+                raw.extend(data)
+                if len(data) < fetch_limit:
+                    break
+            else:
                 break
         except Exception as exc:
             print(f"[crypto_price] Binance klines error for {binance_symbol}: {exc}")
             break
 
-        raw.extend(data)
-        if len(data) < fetch_limit:
-            break
-
-    if not raw:
-        return None
-
-    seen = set()
-    candles: List[Candle] = []
-    for row in raw:
-        ts = int(row[0]) // 1000
-        if ts in seen:
-            continue
-        seen.add(ts)
-        candles.append(
-            Candle(
-                timestamp=ts,
-                open=float(row[1]),
-                high=float(row[2]),
-                low=float(row[3]),
-                close=float(row[4]),
+    if raw:
+        candles = []
+        seen = set()
+        for row in raw:
+            ts = int(row[0]) // 1000
+            if ts in seen:
+                continue
+            seen.add(ts)
+            candles.append(
+                Candle(
+                    timestamp=ts,
+                    open=float(row[1]),
+                    high=float(row[2]),
+                    low=float(row[3]),
+                    close=float(row[4]),
+                )
             )
-        )
 
-    candles.sort(key=lambda c: c.timestamp)
-    while len(candles) > target:
-        candles.pop(0)
-    return candles if candles else None
+        candles.sort(key=lambda c: c.timestamp)
+        while len(candles) > target:
+            candles.pop(0)
+        if candles:
+            return candles
+
+    # 3) Fallback to CoinGecko
+    return fetch_ohlc(symbol, hours=hours, interval=interval)
 
 
 def _ohlc_price_decimals(candles: List[Candle]) -> int:
