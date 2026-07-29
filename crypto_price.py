@@ -614,12 +614,12 @@ def _to_binance_symbol(ticker: str) -> str:
 
 
 def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", request_timeout: int = 60) -> Optional[List[Candle]]:
-    """Fetch OHLC candles with multi-exchange pagination (KuCoin, Binance, CoinGecko).
+    """Fetch OHLC candles with priority: Binance -> KuCoin -> CoinGecko.
     Default fetches 1 year (8760 hours) of 1h candles. Returns oldest-first list of Candle.
     Args:
         symbol: TradingView symbol (e.g. 'BINANCE:BTCUSDT')
         hours: Number of hours of history to fetch
-        interval: Candle interval (1m, 5m, 15m, 1h, 4h, 1D, etc.)
+        interval: Candle interval (1m, 5m, 15m, 1h, 4h, 1d, etc.)
         request_timeout: HTTP request timeout in seconds for Binance API calls
     """
     raw_symbol = symbol.split(":")[-1].upper()
@@ -630,7 +630,6 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
     now = int(time.time())
     target_start = now - hours * 3600
 
-    # Calculate number of candles based on interval duration
     interval_minutes = 60
     if "m" in interval:
         interval_minutes = int(interval.replace("m", ""))
@@ -643,69 +642,8 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
     binance_interval = interval
     if interval == "1D":
         binance_interval = "1d"
-    kucoin_type_map = {
-        "1m": "1min",
-        "5m": "5min",
-        "15m": "15min",
-        "1h": "1hour",
-        "4h": "4hour",
-        "1D": "1day",
-    }
-    kucoin_type = kucoin_type_map.get(interval, "1hour")
 
-    # 1) Try KuCoin (reliable global REST API for historical candles)
-    kucoin_symbol = f"{base_symbol}-USDT"
-    candles: List[Candle] = []
-    current_end = now
-    try:
-        for _ in range((candles_count // 1200) + 5):
-            r = _request_with_fallback(
-                "GET",
-                "https://api.kucoin.com/api/v1/market/candles",
-                params={
-                    "symbol": kucoin_symbol,
-                    "type": kucoin_type,
-                    "startAt": target_start,
-                    "endAt": current_end,
-                },
-                headers=_get_headers(),
-                timeout=min(request_timeout, 15),
-                proxies=PROXIES,
-                verify=False,
-            )
-            if r.status_code == 200:
-                data = r.json().get("data", [])
-                if not data:
-                    break
-                for row in data:
-                    candles.append(
-                        Candle(
-                            timestamp=int(row[0]),
-                            open=float(row[1]),
-                            high=float(row[3]),
-                            low=float(row[4]),
-                            close=float(row[2]),
-                        )
-                    )
-                oldest_ts = int(data[-1][0])
-                if oldest_ts <= target_start:
-                    break
-                current_end = oldest_ts - 1
-            else:
-                break
-    except Exception as exc:
-        print(f"[crypto_price] KuCoin OHLC fetch error for {kucoin_symbol}: {exc}")
-
-    if len(candles) >= 10:
-        seen = set()
-        unique: List[Candle] = []
-        for c in sorted(candles, key=lambda x: x.timestamp):
-            if c.timestamp not in seen:
-                seen.add(c.timestamp)
-                unique.append(c)
-        return unique
-
-    # 2) Fallback to Binance
+    # 1) Try Binance first
     binance_symbol = _to_binance_symbol(symbol)
     target = candles_count
     limit_per_request = MAX_KLINES_PER_REQUEST
@@ -781,6 +719,67 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
             candles.pop(0)
         if candles:
             return candles
+
+    # 2) Fallback to KuCoin
+    kucoin_type_map = {
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        "1h": "1hour",
+        "4h": "4hour",
+        "1D": "1day",
+    }
+    kucoin_type = kucoin_type_map.get(interval, "1hour")
+    kucoin_symbol = f"{base_symbol}-USDT"
+    kucoin_candles: List[Candle] = []
+    current_end = now
+    try:
+        for _ in range((candles_count // 1200) + 5):
+            r = _request_with_fallback(
+                "GET",
+                "https://api.kucoin.com/api/v1/market/candles",
+                params={
+                    "symbol": kucoin_symbol,
+                    "type": kucoin_type,
+                    "startAt": target_start,
+                    "endAt": current_end,
+                },
+                headers=_get_headers(),
+                timeout=min(request_timeout, 15),
+                proxies=PROXIES,
+                verify=False,
+            )
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                if not data:
+                    break
+                for row in data:
+                    kucoin_candles.append(
+                        Candle(
+                            timestamp=int(row[0]),
+                            open=float(row[1]),
+                            high=float(row[3]),
+                            low=float(row[4]),
+                            close=float(row[2]),
+                        )
+                    )
+                oldest_ts = int(data[-1][0])
+                if oldest_ts <= target_start:
+                    break
+                current_end = oldest_ts - 1
+            else:
+                break
+    except Exception as exc:
+        print(f"[crypto_price] KuCoin OHLC fetch error for {kucoin_symbol}: {exc}")
+
+    if len(kucoin_candles) >= 10:
+        seen = set()
+        unique: List[Candle] = []
+        for c in sorted(kucoin_candles, key=lambda x: x.timestamp):
+            if c.timestamp not in seen:
+                seen.add(c.timestamp)
+                unique.append(c)
+        return unique
 
     # 3) Fallback to CoinGecko
     return fetch_ohlc(symbol, hours=hours, interval=interval)

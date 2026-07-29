@@ -723,47 +723,52 @@ def _create_ohlc_excel(name: str, symbol: str, candles: List[Candle]) -> bytes:
     ws.title = f"{symbol} 10Y OHLC"
     ws.views.sheetView[0].showGridLines = True
 
-    # 5 clean columns: Date/Time, Open, High, Low, Close
     headers = ["Date/Time", "Open", "High", "Low", "Close"]
-    ws.append(headers)
-
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     header_fill = PatternFill("solid", fgColor="1F4E78")
     align_center = Alignment(horizontal="center", vertical="center")
     align_right = Alignment(horizontal="right", vertical="center")
 
-    ws.row_dimensions[1].height = 26
-    for cell in ws[1]:
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = align_center
-
     ref_price = candles[-1].close if candles else 1.0
     num_fmt = "#,##0.00" if ref_price >= 1 else "#,##0.000000"
 
-    for c in candles:
-        dt_str = datetime.fromtimestamp(c.timestamp).strftime("%Y-%m-%d %H:%M")
-        ws.append([
-            dt_str,
-            float(c.open),
-            float(c.high),
-            float(c.low),
-            float(c.close),
-        ])
+    def _write_full(worksheet) -> None:
+        worksheet.row_dimensions[1].height = 26
+        for cell in worksheet[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = align_center
 
-    for r_idx in range(2, len(candles) + 2):
-        ws.row_dimensions[r_idx].height = 20
-        ws.cell(row=r_idx, column=1).alignment = align_center
-        for c_idx in range(2, 6):
-            cell = ws.cell(row=r_idx, column=c_idx)
-            cell.alignment = align_right
-            cell.number_format = num_fmt
+        for c in candles:
+            dt_str = datetime.fromtimestamp(c.timestamp).strftime("%Y-%m-%d %H:%M")
+            worksheet.append([
+                dt_str,
+                float(c.open),
+                float(c.high),
+                float(c.low),
+                float(c.close),
+            ])
 
-    ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 15
-    ws.column_dimensions["C"].width = 15
-    ws.column_dimensions["D"].width = 15
-    ws.column_dimensions["E"].width = 15
+        for r_idx in range(2, len(candles) + 2):
+            worksheet.row_dimensions[r_idx].height = 20
+            worksheet.cell(row=r_idx, column=1).alignment = align_center
+            for c_idx in range(2, 6):
+                cell = worksheet.cell(row=r_idx, column=c_idx)
+                cell.alignment = align_right
+                cell.number_format = num_fmt
+
+        worksheet.column_dimensions["A"].width = 18
+        worksheet.column_dimensions["B"].width = 15
+        worksheet.column_dimensions["C"].width = 15
+        worksheet.column_dimensions["D"].width = 15
+        worksheet.column_dimensions["E"].width = 15
+
+    _write_full(ws)
+
+    if len(candles) > 500000:
+        for i in range(1, 3):
+            new_ws = wb.create_sheet(title=f"{symbol} 10Y OHLC ({i + 1})")
+            _write_full(new_ws)
 
     bio = BytesIO()
     wb.save(bio)
@@ -804,11 +809,11 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str, inte
     }.get(interval, 60)
 
     max_candle_hours = {
-        "1m": 720,
-        "5m": 2160,
-        "15m": 4320,
-        "1h": 8760,
-        "4h": 17520,
+        "1m": 17520,
+        "5m": 17520,
+        "15m": 17520,
+        "1h": 87600,
+        "4h": 87600,
         "1D": 87600,
     }.get(interval, 8760)
 
@@ -824,16 +829,16 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str, inte
         return
 
     try:
-        file_bytes = _create_ohlc_excel(name, symbol, candles)
-        filename = f"{symbol}_10Y_OHLC_{interval}.xlsx"
-
         first_date = datetime.fromtimestamp(candles[0].timestamp).strftime("%Y-%m-%d %H:%M")
         last_date = datetime.fromtimestamp(candles[-1].timestamp).strftime("%Y-%m-%d %H:%M")
+        file_bytes = _create_ohlc_excel(name, symbol, candles)
+        filename = f"{symbol}_OHLC_{interval}_{first_date[:10]}_{last_date[:10]}.xlsx".replace(":", "")
+
         high_period = max(c.high for c in candles)
         low_period = min(c.low for c in candles)
 
         caption = (
-            f"📊 *فایل اکسل داده‌های ۱۰ ساله — {escape_markdown(name)} ({symbol})*\n"
+            f"📊 *فایل اکسل داده‌های OHLC — {escape_markdown(name)} ({symbol})*\n"
             f"━━━━━━━━━━━━━━\n"
             f"🕒 *تعداد کندل‌ها:* `{len(candles):,}` کندل\n"
             f"⏱ *تایم‌فریم:* {interval_label} ({interval})\n"
