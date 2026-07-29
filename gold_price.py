@@ -139,7 +139,7 @@ def fetch_gold_price() -> Optional[GoldPrice]:
                 usd_price = tv_gold.price
                 if usd_price > 0:
                     rate = EXCHANGE_RATES.get("USD_IRR", 59700)
-                    change_toman = int(usd_change * rate / 10)
+                    change_toman = int(usd_change * rate / 31.1035)
                     percent = tv_gold.change_percent
         except Exception as exc:
             print(f"[gold_price] TradingView fallback error: {exc}")

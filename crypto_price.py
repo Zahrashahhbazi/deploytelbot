@@ -613,9 +613,14 @@ def _to_binance_symbol(ticker: str) -> str:
     return s
 
 
-def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> Optional[List[Candle]]:
+def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", request_timeout: int = 60) -> Optional[List[Candle]]:
     """Fetch OHLC candles with multi-exchange pagination (KuCoin, Binance, CoinGecko).
     Default fetches 1 year (8760 hours) of 1h candles. Returns oldest-first list of Candle.
+    Args:
+        symbol: TradingView symbol (e.g. 'BINANCE:BTCUSDT')
+        hours: Number of hours of history to fetch
+        interval: Candle interval (1m, 5m, 15m, 1h, 4h, 1D, etc.)
+        request_timeout: HTTP request timeout in seconds for Binance API calls
     """
     raw_symbol = symbol.split(":")[-1].upper()
     base_symbol = raw_symbol.replace("USDT", "").replace("USD", "").replace("-", "").replace("_", "")
@@ -625,12 +630,22 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> 
     now = int(time.time())
     target_start = now - hours * 3600
 
+    # Calculate number of candles based on interval duration
+    interval_minutes = 60
+    if "m" in interval:
+        interval_minutes = int(interval.replace("m", ""))
+    elif "h" in interval:
+        interval_minutes = int(interval.replace("h", "")) * 60
+    elif "d" in interval:
+        interval_minutes = int(interval.replace("d", "")) * 60 * 24
+    candles_count = max(hours * 60 // interval_minutes, hours)
+
     # 1) Try KuCoin (reliable global REST API for historical candles)
     kucoin_symbol = f"{base_symbol}-USDT"
     candles: List[Candle] = []
     current_end = now
     try:
-        for _ in range((hours // 1200) + 5):
+        for _ in range((candles_count // 1200) + 5):
             r = _request_with_fallback(
                 "GET",
                 "https://api.kucoin.com/api/v1/market/candles",
@@ -641,7 +656,7 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> 
                     "endAt": current_end,
                 },
                 headers=_get_headers(),
-                timeout=12,
+                timeout=min(request_timeout, 15),
                 proxies=PROXIES,
                 verify=False,
             )
@@ -679,7 +694,7 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> 
 
     # 2) Fallback to Binance
     binance_symbol = _to_binance_symbol(symbol)
-    target = hours
+    target = candles_count
     limit_per_request = MAX_KLINES_PER_REQUEST
     raw: List[List] = []
 
@@ -698,28 +713,37 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h") -> 
             oldest_open_time = raw[-1][0]
             params["endTime"] = oldest_open_time - 1
 
-        try:
-            response = _request_with_fallback(
-                "GET",
-                BINANCE_KLINES,
-                params=params,
-                headers=_get_headers(),
-                timeout=20,
-                proxies=PROXIES,
-                verify=False,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if not data:
+        retries = 3
+        for attempt in range(retries):
+            try:
+                response = _request_with_fallback(
+                    "GET",
+                    BINANCE_KLINES,
+                    params=params,
+                    headers=_get_headers(),
+                    timeout=request_timeout,
+                    proxies=PROXIES,
+                    verify=False,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if not data:
+                        break
+                    raw.extend(data)
+                    if len(data) < fetch_limit:
+                        break
                     break
-                raw.extend(data)
-                if len(data) < fetch_limit:
+                else:
+                    if attempt < retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
                     break
-            else:
+            except Exception as exc:
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"[crypto_price] Binance klines error for {binance_symbol}: {exc}")
                 break
-        except Exception as exc:
-            print(f"[crypto_price] Binance klines error for {binance_symbol}: {exc}")
-            break
 
     if raw:
         candles = []
@@ -1326,7 +1350,7 @@ def format_currency_conversion(usd_amount: float, toman_amount: float) -> str:
 
 
 def format_gold_comparison(gold_toman: int, gold_usd: float) -> str:
-    """Compare gold price in Iran (per gram) vs global (per gram)."""
+    """Compare gold price in Iran (per gram) vs global (per ounce and per gram)."""
     gold_usd_per_gram = gold_usd / 31.1035
     gold_toman_per_ounce = gold_toman * 31.1035
     return (
