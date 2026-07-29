@@ -809,18 +809,20 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str, inte
     }.get(interval, 60)
 
     max_candle_hours = {
-        "1m": 17520,
-        "5m": 17520,
-        "15m": 17520,
-        "1h": 87600,
-        "4h": 87600,
-        "1D": 87600,
+        "1m": 720,
+        "5m": 2160,
+        "15m": 4320,
+        "1h": 8760,
+        "4h": 17520,
+        "1D": 43800,
     }.get(interval, 8760)
 
     candles = fetch_binance_ohlc(symbol, hours=max_candle_hours, interval=interval, request_timeout=interval_timeout)
     if not candles or len(candles) < 2:
         notifier.send_message(
-            f"❌ *خطا در دریافت داده‌های کندل برای {escape_markdown(name)}*\nکمی بعد دوباره امتحان کن.",
+            f"❌ *خطا در دریافت داده‌های کندل برای {escape_markdown(name)}*\n"
+            f"تایم‌فریم: {interval_label}\n"
+            f"کمی بعد دوباره امتحان کن یا تایم‌فریم دیگری انتخاب کن.",
             chat_id=chat_id,
             buttons=[
                 [("🔄 تلاش مجدد", f"cmd_ohlc_{ticker}|{interval}"), ("🏠 منو", "cmd_back")],
@@ -837,11 +839,15 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str, inte
         high_period = max(c.high for c in candles)
         low_period = min(c.low for c in candles)
 
+        available_years = (candles[-1].timestamp - candles[0].timestamp) / (365 * 24 * 3600)
+        available_info = f"حدود {available_years:.1f} سال داده موجود"
+
         caption = (
             f"📊 *فایل اکسل داده‌های OHLC — {escape_markdown(name)} ({symbol})*\n"
             f"━━━━━━━━━━━━━━\n"
             f"🕒 *تعداد کندل‌ها:* `{len(candles):,}` کندل\n"
             f"⏱ *تایم‌فریم:* {interval_label} ({interval})\n"
+            f"📅 *داده‌های موجود:* {available_info}\n"
             f"📋 *ستون‌های اکسل:* Date/Time | Open | High | Low | Close\n"
             f"📅 *بازه زمانی:* از `{first_date}` تا `{last_date}`\n"
             f"━━━━━━━━━━━━━━\n"

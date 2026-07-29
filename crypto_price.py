@@ -649,52 +649,72 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
     limit_per_request = MAX_KLINES_PER_REQUEST
     raw: List[List] = []
 
-    for _ in range((target // limit_per_request) + 5):
-        if len(raw) >= target:
-            break
-        remaining = target - len(raw)
-        fetch_limit = min(limit_per_request, remaining)
+    binance_ok = False
+    try:
+        test_response = _request_with_fallback(
+            "GET",
+            BINANCE_KLINES,
+            params={
+                "symbol": binance_symbol,
+                "interval": binance_interval,
+                "limit": 1,
+            },
+            headers=_get_headers(),
+            timeout=min(request_timeout, 15),
+            proxies=PROXIES,
+            verify=False,
+        )
+        binance_ok = test_response.status_code == 200
+    except Exception:
+        binance_ok = False
 
-        params = {
-            "symbol": binance_symbol,
-            "interval": binance_interval,
-            "limit": fetch_limit,
-        }
-        if raw:
-            oldest_open_time = raw[-1][0]
-            params["endTime"] = oldest_open_time - 1
+    if binance_ok:
+        for _ in range((target // limit_per_request) + 5):
+            if len(raw) >= target:
+                break
+            remaining = target - len(raw)
+            fetch_limit = min(limit_per_request, remaining)
 
-        retries = 3
-        for attempt in range(retries):
-            try:
-                response = _request_with_fallback(
-                    "GET",
-                    BINANCE_KLINES,
-                    params=params,
-                    headers=_get_headers(),
-                    timeout=request_timeout,
-                    proxies=PROXIES,
-                    verify=False,
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if not data:
+            params = {
+                "symbol": binance_symbol,
+                "interval": binance_interval,
+                "limit": fetch_limit,
+            }
+            if raw:
+                oldest_open_time = raw[-1][0]
+                params["endTime"] = oldest_open_time - 1
+
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    response = _request_with_fallback(
+                        "GET",
+                        BINANCE_KLINES,
+                        params=params,
+                        headers=_get_headers(),
+                        timeout=request_timeout,
+                        proxies=PROXIES,
+                        verify=False,
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        if not data:
+                            break
+                        raw.extend(data)
+                        if len(data) < fetch_limit:
+                            break
                         break
-                    raw.extend(data)
-                    if len(data) < fetch_limit:
+                    else:
+                        if attempt < retries - 1:
+                            time.sleep(2 ** attempt)
+                            continue
                         break
-                    break
-                else:
+                except Exception as exc:
                     if attempt < retries - 1:
                         time.sleep(2 ** attempt)
                         continue
+                    print(f"[crypto_price] Binance klines error for {binance_symbol}: {exc}")
                     break
-            except Exception as exc:
-                if attempt < retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                print(f"[crypto_price] Binance klines error for {binance_symbol}: {exc}")
-                break
 
     if raw:
         candles = []
@@ -743,6 +763,7 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
                     "type": kucoin_type,
                     "startAt": target_start,
                     "endAt": current_end,
+                    "limit": 1200,
                 },
                 headers=_get_headers(),
                 timeout=min(request_timeout, 15),
