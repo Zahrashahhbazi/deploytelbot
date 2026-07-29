@@ -640,6 +640,19 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
         interval_minutes = int(interval.replace("d", "")) * 60 * 24
     candles_count = max(hours * 60 // interval_minutes, hours)
 
+    binance_interval = interval
+    if interval == "1D":
+        binance_interval = "1d"
+    kucoin_type_map = {
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        "1h": "1hour",
+        "4h": "4hour",
+        "1D": "1day",
+    }
+    kucoin_type = kucoin_type_map.get(interval, "1hour")
+
     # 1) Try KuCoin (reliable global REST API for historical candles)
     kucoin_symbol = f"{base_symbol}-USDT"
     candles: List[Candle] = []
@@ -651,7 +664,7 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
                 "https://api.kucoin.com/api/v1/market/candles",
                 params={
                     "symbol": kucoin_symbol,
-                    "type": "1hour",
+                    "type": kucoin_type,
                     "startAt": target_start,
                     "endAt": current_end,
                 },
@@ -706,7 +719,7 @@ def fetch_binance_ohlc(symbol: str, hours: int = 8760, interval: str = "1h", req
 
         params = {
             "symbol": binance_symbol,
-            "interval": interval,
+            "interval": binance_interval,
             "limit": fetch_limit,
         }
         if raw:
