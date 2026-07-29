@@ -803,7 +803,16 @@ def _send_ohlc_table(notifier: TelegramNotifier, chat_id: str, ticker: str, inte
         "1D": 45,
     }.get(interval, 60)
 
-    candles = fetch_binance_ohlc(symbol, hours=87600, interval=interval, request_timeout=interval_timeout)
+    max_candle_hours = {
+        "1m": 720,
+        "5m": 2160,
+        "15m": 4320,
+        "1h": 8760,
+        "4h": 17520,
+        "1D": 87600,
+    }.get(interval, 8760)
+
+    candles = fetch_binance_ohlc(symbol, hours=max_candle_hours, interval=interval, request_timeout=interval_timeout)
     if not candles or len(candles) < 2:
         notifier.send_message(
             f"❌ *خطا در دریافت داده‌های کندل برای {escape_markdown(name)}*\nکمی بعد دوباره امتحان کن.",
